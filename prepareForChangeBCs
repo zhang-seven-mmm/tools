@@ -1,0 +1,107 @@
+#!/bin/bash
+
+myCurrentDIR=$( cd "$( dirname "${BASH_SOURCE[0]}" )/../.." && pwd )
+: ${msSrc:=$myCurrentDIR} ; export msSrc
+. $msSrc/script/initbash
+
+rm -rf ./proces*
+rm -rf ./system
+rm -rf ./0
+rm -rf ./constant
+
+read -p "input path to origCase. eg:/hpcfiles/users/yyf.zhangqi/porefoam/porefoam-master/daqing/waitDelete/daqing45_Uo1300w0CAw45-old     " pathToOrigCase
+#: $( pathToOrigCase = "/hpcfiles/users/yyf.zhangqi/porefoam/porefoam-master/daqing/S6_Uo130w0CAw45-322" )
+
+# Inlet BCs, Darcy velocity (um/s) for oil phase:
+: ${UD1s:="130"}
+
+# Inlet BCs, Darcy velocity (um/s) for water phase:
+: ${UD0s:="0"}
+: ${tDrainEnd:="4.11"}
+: ${xInitAlpha:="0.05"}
+: ${pdMeanValue1:="0"}
+: ${pdMeanValue2:="0"}
+: ${direction:=-}
+
+
+processorDirs="$(cd $pathToOrigCase/ && ls -d processo*[0-9])"	
+arr=($processorDirs)
+IFS=$'\n'
+        nProc=$(( $(echo "${arr[*]}" | sed 's/processor//g' | sort -nr | head -n1)+1 ))
+echo "nProc $nProc"
+
+echo  "setting new case from original case "
+cp -r $pathToOrigCase/system ./
+cp -r $pathToOrigCase/constant ./
+cp -r $pathToOrigCase/log.checkMesh ./
+touch ./change.foam
+
+cp -r $pathToOrigCase/0 ./
+
+latestTime="$(cd ${pathToOrigCase}/processor0 && ls -d -1 $tDrainEnd* | sed '/[a-z]/d'| sort -n -r | tail -n 1 | sort -n | head -n 1)"
+echo "latestTime $latestTime"
+for processorDir in $processorDirs; do
+	mkdir ./$processorDir
+	cp -r $pathToOrigCase/$processorDir/0 ./$processorDir
+	cp -r $pathToOrigCase/$processorDir/constant ./$processorDir
+	cp $pathToOrigCase/$processorDir/$latestTime/alpha1  ./$processorDir/0/alpha1
+done
+
+deleteKeyword "defaultFieldValues"  ./system/setFieldsDict
+
+boundingBox=$(cat ./log.checkMesh | grep ound | grep box | sed 's:[a-zA-Z][a-zA-Z][a-zA-Z]*::g' \
+			                  | sed 's:[\(\)]::g' |  sed 's:[eE]:\*10\^:g' | sed -e 's:[\t ][\t ]*:\n:g')
+boundingBox=($boundingBox)
+
+if [ "$direction" == "-" ]; then
+			xInitAlpha=$(echo "scale=10; ${boundingBox[3]}-(${boundingBox[3]}-(${boundingBox[0]}))*$xInitAlpha" | bc )
+			echo "xEndAlpha: $xInitAlpha "
+			setKeywordValues box  "    ($xInitAlpha -1000 -1000)  (1000 1000 1000);" ./system/setFieldsDict
+		else
+			xInitAlpha=$(echo "scale=10; ${boundingBox[0]}+(${boundingBox[3]}-(${boundingBox[0]}))*$xInitAlpha" | bc )
+			echo "xInitAlpha: $xInitAlpha"
+			setKeywordValues box  "    (-1. -1. -1.) ($xInitAlpha 1000 1000);" ./system/setFieldsDict
+		fi
+
+#setKeywordValues   writeFormat ascii ./system/controlDict
+
+echo "UD1: $UD1s,   boundingBox:  ${boundingBox[*]}"
+QOil=$(echo "scale=18; (${boundingBox[4]}-(${boundingBox[1]}))*(${boundingBox[5]}-(${boundingBox[2]}))*$UD1s*0.000001" | bc )
+QWat=$(echo "scale=18; (${boundingBox[4]}-(${boundingBox[1]}))*(${boundingBox[5]}-(${boundingBox[2]}))*$UD0s*0.000001" | bc )
+echo "QOil: $QOil, QWat: $QWat,  "
+
+#processorDirs="$(ls -d processo*[0-9])"
+inlet=Left
+outlet=Right
+for processorDir in $processorDirs; do
+
+	setBoundaryCondition $inlet "flowRate1" "$QOil" ./$processorDir/0/U
+	setBoundaryCondition $inlet "flowRate0" "$QWat" ./$processorDir/0/U
+	setBoundaryCondition $outlet "meanValue1" "$pdMeanValue1" ./$processorDir/0/pd
+	setBoundaryCondition $outlet "meanValue2" "$pdMeanValue2" ./$processorDir/0/pd
+	
+done
+
+if [ "$direction" == "-" ]; then
+	echo "swap the inlet and outlet boundaries"
+	for processorDir in $processorDirs; do
+		sed -i 's/Left/Raight/g'  ./$processorDir/0/U
+		sed -i 's/Right/Left/g'   ./$processorDir/0/U
+		sed -i 's/Raight/Right/g' ./$processorDir/0/U
+		sed -i 's/Left/Raight/g'  ./$processorDir/0/pd
+		sed -i 's/Right/Left/g'   ./$processorDir/0/pd
+		sed -i 's/Raight/Right/g' ./$processorDir/0/pd
+		sed -i 's/Left/Raight/g'  ./$processorDir/0/alpha1
+		sed -i 's/Right/Left/g'   ./$processorDir/0/alpha1
+		sed -i 's/Raight/Right/g' ./$processorDir/0/alpha1
+		
+		sed -i ":begin; /value/,/;/ { /;/! { $! { N; b begin }; }; s/value.*;/ value         uniform 0;/; };"  ./$processorDir/0/pd
+		sed -i ":begin; /gradient/,/;/ { /;/! { $! { N; b begin }; }; s/gradient.*;/ gradient         uniform 0;/; };"  ./$processorDir/0/pd
+
+		sed -i ":begin; /value/,/;/ { /;/! { $! { N; b begin }; }; s/value.*;/ value          uniform  ( 0 0 0 );/; };"  ./$processorDir/0/U
+		sed -i ":begin; /inletValue/,/;/ { /;/! { $! { N; b begin }; }; s/inletValue.*;/ inletValue         uniform  ( 0 0 0 );/; };"  ./$processorDir/0/U
+		sed -i ":begin; /Right/,/}/ { /}/! { $! { N; b begin }; };  s/type.*}/type            constantAlphaContactAngle;\n       value         uniform 1;\n        limit           gradient;\n        theta0          90;\n        transitionFactor 0.6;\n}/; };" \
+		          ./$processorDir/0/alpha1
+		
+	done
+fi
